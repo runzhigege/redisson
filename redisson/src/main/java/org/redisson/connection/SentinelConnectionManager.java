@@ -19,6 +19,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -32,10 +33,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
 
 import org.redisson.api.NodeType;
 import org.redisson.api.RFuture;
+import org.redisson.client.RedisAuthRequiredException;
 import org.redisson.client.RedisClient;
+import org.redisson.client.RedisClientConfig;
 import org.redisson.client.RedisConnection;
 import org.redisson.client.RedisConnectionException;
 import org.redisson.client.codec.StringCodec;
@@ -54,6 +58,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.resolver.AddressResolver;
+import io.netty.util.NetUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.netty.util.concurrent.ScheduledFuture;
@@ -67,12 +72,15 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
 
-    private final ConcurrentMap<String, RedisClient> sentinels = new ConcurrentHashMap<>();
+    private final Set<URI> sentinelHosts = new HashSet<>();
+    private final ConcurrentMap<URI, RedisClient> sentinels = new ConcurrentHashMap<>();
     private final AtomicReference<String> currentMaster = new AtomicReference<>();
 
     private final Set<URI> disconnectedSlaves = new HashSet<>();
     private ScheduledFuture<?> monitorFuture;
     private AddressResolver<InetSocketAddress> sentinelResolver;
+
+    private boolean usePassword = false;
 
     public SentinelConnectionManager(SentinelServersConfig cfg, Config config, UUID id) {
         super(config, id);
@@ -92,12 +100,36 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
         for (URI addr : cfg.getSentinelAddresses()) {
             RedisClient client = createClient(NodeType.SENTINEL, addr, this.config.getConnectTimeout(), this.config.getRetryInterval() * this.config.getRetryAttempts(), null);
             try {
+                RedisConnection c = client.connect();
+                try {
+                    c.sync(RedisCommands.PING);
+                } catch (RedisAuthRequiredException e) {
+                    usePassword = true;
+                }
+                client.shutdown();
+                break;
+            } catch (Exception e) {
+                // skip
+            }
+        }
+        
+        for (URI addr : cfg.getSentinelAddresses()) {
+            if (NetUtil.createByteArrayFromIpAddressString(addr.getHost()) == null && !addr.getHost().equals("localhost")) {
+                sentinelHosts.add(convert(addr.getHost(), "" + addr.getPort()));
+            }
+            
+            RedisClient client = createClient(NodeType.SENTINEL, addr, this.config.getConnectTimeout(), this.config.getRetryInterval() * this.config.getRetryAttempts(), null);
+            try {
                 RedisConnection connection = client.connect();
                 if (!connection.isActive()) {
                     continue;
                 }
 
                 List<String> master = connection.sync(RedisCommands.SENTINEL_GET_MASTER_ADDR_BY_NAME, cfg.getMasterName());
+                if (master.isEmpty()) {
+                    throw new RedisConnectionException("Master node is undefined! SENTINEL GET-MASTER-ADDR-BY-NAME command returns empty result!");
+                }
+                
                 String masterHost = createAddress(master.get(0), master.get(1));
                 this.config.setMasterAddress(masterHost);
                 currentMaster.set(masterHost);
@@ -136,12 +168,14 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
                     String ip = map.get("ip");
                     String port = map.get("port");
 
-                    String host = createAddress(ip, port);
-                    log.info("sentinel: {} added", host);
-                    URI sentinelAddr = URIBuilder.create(host);
+                    URI sentinelAddr = convert(ip, port);
                     RFuture<Void> future = registerSentinel(sentinelAddr, this.config);
                     connectionFutures.add(future);
                 }
+                
+                URI currentAddr = convert(client.getAddr().getAddress().getHostAddress(), "" + client.getAddr().getPort());
+                RFuture<Void> f = registerSentinel(currentAddr, this.config);
+                connectionFutures.add(f);
                 
                 for (RFuture<Void> future : connectionFutures) {
                     future.awaitUninterruptibly(this.config.getConnectTimeout());
@@ -175,20 +209,28 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
     
     @Override
     protected void startDNSMonitoring(RedisClient masterHost) {
-        if (config.getDnsMonitoringInterval() == -1) {
+        if (config.getDnsMonitoringInterval() == -1 || sentinelHosts.isEmpty()) {
             return;
         }
         
         scheduleSentinelDNSCheck();
+    }
+    
+    @Override
+    protected RedisClientConfig createRedisConfig(NodeType type, URI address, int timeout, int commandTimeout,
+            String sslHostname) {
+        RedisClientConfig result = super.createRedisConfig(type, address, timeout, commandTimeout, sslHostname);
+        if (type == NodeType.SENTINEL && !usePassword) {
+            result.setPassword(null);
+        }
+        return result;
     }
 
     private void scheduleSentinelDNSCheck() {
         monitorFuture = group.schedule(new Runnable() {
             @Override
             public void run() {
-                List<RedisClient> sentinels = new ArrayList<>(SentinelConnectionManager.this.sentinels.values());
-                
-                final AtomicInteger sentinelsCounter = new AtomicInteger(sentinels.size());
+                AtomicInteger sentinelsCounter = new AtomicInteger(sentinelHosts.size());
                 FutureListener<List<InetSocketAddress>> commonListener = new FutureListener<List<InetSocketAddress>>() {
                     @Override
                     public void operationComplete(Future<List<InetSocketAddress>> future) throws Exception {
@@ -198,41 +240,23 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
                     }
                 };
                 
-                for (final RedisClient client : sentinels) {
-                    Future<List<InetSocketAddress>> allNodes = sentinelResolver.resolveAll(InetSocketAddress.createUnresolved(client.getAddr().getHostName(), client.getAddr().getPort()));
+                for (URI host : sentinelHosts) {
+                    Future<List<InetSocketAddress>> allNodes = sentinelResolver.resolveAll(InetSocketAddress.createUnresolved(host.getHost(), host.getPort()));
                     allNodes.addListener(new FutureListener<List<InetSocketAddress>>() {
                         @Override
                         public void operationComplete(Future<List<InetSocketAddress>> future) throws Exception {
                             if (!future.isSuccess()) {
-                                log.error("Unable to resolve " + client.getAddr().getHostName(), future.cause());
+                                log.error("Unable to resolve " + host.getHost(), future.cause());
                                 return;
                             }
                             
-                            boolean clientFound = false;
-                            for (InetSocketAddress addr : future.getNow()) {
-                                boolean found = false;
-                                for (RedisClient currentSentinel : SentinelConnectionManager.this.sentinels.values()) {
-                                    if (currentSentinel.getAddr().getAddress().getHostAddress().equals(addr.getAddress().getHostAddress())
-                                            && currentSentinel.getAddr().getPort() == addr.getPort()) {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if (!found) {
-                                    URI uri = convert(addr.getAddress().getHostAddress(), "" + addr.getPort());
+                            Set<URI> newUris = future.getNow().stream()
+                                                .map(addr -> convert(addr.getAddress().getHostAddress(), "" + addr.getPort()))
+                                                .collect(Collectors.toSet());
+
+                            for (URI uri : newUris) {
+                                if (!sentinels.containsKey(uri)) {
                                     registerSentinel(uri, getConfig());
-                                }
-                                if (client.getAddr().getAddress().getHostAddress().equals(addr.getAddress().getHostAddress())
-                                        && client.getAddr().getPort() == addr.getPort()) {
-                                    clientFound = true;
-                                }
-                            }
-                            if (!clientFound) {
-                                String addr = client.getAddr().getAddress().getHostAddress() + ":" + client.getAddr().getPort();
-                                RedisClient sentinel = SentinelConnectionManager.this.sentinels.remove(addr);
-                                if (sentinel != null) {
-                                    sentinel.shutdownAsync();
-                                    log.warn("sentinel: {} has down", addr);
                                 }
                             }
                         }
@@ -243,21 +267,24 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
         }, config.getDnsMonitoringInterval(), TimeUnit.MILLISECONDS);
     }
     
-    private void scheduleChangeCheck(final SentinelServersConfig cfg, final Iterator<RedisClient> iterator) {
+    private void scheduleChangeCheck(SentinelServersConfig cfg, Iterator<RedisClient> iterator) {
         monitorFuture = group.schedule(new Runnable() {
             @Override
             public void run() {
                 AtomicReference<Throwable> lastException = new AtomicReference<Throwable>();
                 Iterator<RedisClient> iter = iterator;
                 if (iter == null) {
-                    iter = sentinels.values().iterator();
+                    // Shuffle the list so all clients don't prefer the same sentinel
+                    List<RedisClient> clients = new ArrayList<>(sentinels.values());
+                    Collections.shuffle(clients);
+                    iter = clients.iterator();
                 }
                 checkState(cfg, iter, lastException);
             }
         }, cfg.getScanInterval(), TimeUnit.MILLISECONDS);
     }
 
-    private void checkState(final SentinelServersConfig cfg, final Iterator<RedisClient> iterator, final AtomicReference<Throwable> lastException) {
+    private void checkState(SentinelServersConfig cfg, Iterator<RedisClient> iterator, AtomicReference<Throwable> lastException) {
         if (!iterator.hasNext()) {
             if (lastException.get() != null) {
                 log.error("Can't update cluster state", lastException.get());
@@ -284,7 +311,7 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
 
     }
 
-    private void updateState(final SentinelServersConfig cfg, final RedisConnection connection, final Iterator<RedisClient> iterator) {
+    private void updateState(SentinelServersConfig cfg, RedisConnection connection, Iterator<RedisClient> iterator) {
         AtomicInteger commands = new AtomicInteger(2);
         BiConsumer<Object, Throwable> commonListener = new BiConsumer<Object, Throwable>() {
             
@@ -313,8 +340,8 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
                 return;
             }
 
-            final String current = currentMaster.get();
-            final String newMaster = createAddress(master.get(0), master.get(1));
+            String current = currentMaster.get();
+            String newMaster = createAddress(master.get(0), master.get(1));
             if (!newMaster.equals(current)
                     && currentMaster.compareAndSet(current, newMaster)) {
                 RFuture<RedisClient> changeFuture = changeMaster(singleSlotRange.getStartSlot(), URIBuilder.create(newMaster));
@@ -401,19 +428,44 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
                 return;
             }
             
-            for (Map<String, String> map : list) {
-                if (map.isEmpty()) {
-                    continue;
+            Set<URI> newUris = list.stream().filter(m -> {
+                String flags = m.get("flags");
+                if (!m.isEmpty() && !flags.contains("disconnected") && !flags.contains("s_down")) {
+                    return true;
                 }
-                
-                String ip = map.get("ip");
-                String port = map.get("port");
-                
-                URI sentinelAddr = convert(ip, port);
-                registerSentinel(sentinelAddr, getConfig());
-            }
+                return false;
+            }).map(m -> {
+                String ip = m.get("ip");
+                String port = m.get("port");
+                return convert(ip, port);
+            }).collect(Collectors.toSet());
+            
+            InetSocketAddress addr = connection.getRedisClient().getAddr();
+            URI currentAddr = convert(addr.getAddress().getHostAddress(), "" + addr.getPort());
+            newUris.add(currentAddr);
+            
+            updateSentinels(newUris);
         });
         sentinelsFuture.onComplete(commonListener);
+    }
+
+    private void updateSentinels(Set<URI> newUris) {
+        Set<URI> currentUris = new HashSet<>(SentinelConnectionManager.this.sentinels.keySet());
+        Set<URI> addedUris = new HashSet<>(newUris);
+        addedUris.removeAll(currentUris);
+        
+        for (URI uri : addedUris) {
+            registerSentinel(uri, getConfig());
+        }
+        currentUris.removeAll(newUris);
+        
+        for (URI uri : currentUris) {
+            RedisClient sentinel = SentinelConnectionManager.this.sentinels.remove(uri);
+            if (sentinel != null) {
+                sentinel.shutdownAsync();
+                log.warn("sentinel: {} has down", uri);
+            }
+        }
     }
 
     private String createAddress(String host, Object port) {
@@ -433,9 +485,8 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
         return entry;
     }
 
-    private RFuture<Void> registerSentinel(final URI addr, final MasterSlaveServersConfig c) {
-        String key = addr.getHost() + ":" + addr.getPort();
-        RedisClient sentinel = sentinels.get(key);
+    private RFuture<Void> registerSentinel(URI addr, MasterSlaveServersConfig c) {
+        RedisClient sentinel = sentinels.get(addr);
         if (sentinel != null) {
             return RedissonPromise.newSucceededFuture(null);
         }
@@ -449,7 +500,8 @@ public class SentinelConnectionManager extends MasterSlaveConnectionManager {
                 return;
             }
 
-            sentinels.putIfAbsent(key, client);
+            sentinels.putIfAbsent(addr, client);
+            log.info("sentinel: {} added", addr);
             result.trySuccess(null);
         });
         return result;

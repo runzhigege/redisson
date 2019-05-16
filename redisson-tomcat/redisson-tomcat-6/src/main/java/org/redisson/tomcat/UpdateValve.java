@@ -19,7 +19,6 @@ import java.io.IOException;
 
 import javax.servlet.ServletException;
 
-import org.apache.catalina.Session;
 import org.apache.catalina.connector.Request;
 import org.apache.catalina.connector.Response;
 import org.apache.catalina.valves.ValveBase;
@@ -32,6 +31,7 @@ import org.apache.catalina.valves.ValveBase;
  */
 public class UpdateValve extends ValveBase {
 
+    private static final String ALREADY_FILTERED_NOTE = UpdateValve.class.getName() + ".ALREADY_FILTERED_NOTE";
     private final RedissonSessionManager manager;
     
     public UpdateValve(RedissonSessionManager manager) {
@@ -41,23 +41,24 @@ public class UpdateValve extends ValveBase {
 
     @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
-        String sessionId = request.getRequestedSessionId();
-        Session session = request.getContext().getManager().findSession(sessionId);
-        if (session != null) {
-            if (!session.isValid()) {
-                session.expire();
-                request.getContext().getManager().remove(session);
-            } else {
-                manager.add(session);
-                session.access();
-                session.endAccess();
+        //check if we already filtered/processed this request 
+        if (request.getNote(ALREADY_FILTERED_NOTE) == null) {
+            request.setNote(ALREADY_FILTERED_NOTE, Boolean.TRUE);
+            try {
+                getNext().invoke(request, response);
+            } finally {
+                request.removeNote(ALREADY_FILTERED_NOTE);
+                final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+                try {
+                    ClassLoader applicationClassLoader = request.getContext().getLoader().getClassLoader();
+                    Thread.currentThread().setContextClassLoader(applicationClassLoader);
+                    manager.store(request.getSession(false));
+                } finally {
+                    Thread.currentThread().setContextClassLoader(classLoader);
+                }
             }
-        }
-        
-        try {
+        } else {
             getNext().invoke(request, response);
-        } finally {
-            manager.store(request.getSession(false));
         }
     }
 

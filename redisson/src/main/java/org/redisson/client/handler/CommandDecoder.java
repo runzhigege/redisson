@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import org.redisson.client.RedisAskException;
+import org.redisson.client.RedisAuthRequiredException;
 import org.redisson.client.RedisException;
 import org.redisson.client.RedisLoadingException;
 import org.redisson.client.RedisMovedException;
@@ -94,10 +95,6 @@ public class CommandDecoder extends ReplayingDecoder<State> {
     protected final void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
         QueueCommand data = ctx.channel().attr(CommandsQueue.CURRENT_COMMAND).get();
 
-        if (log.isTraceEnabled()) {
-            log.trace("reply: {}, channel: {}, command: {}", in.toString(0, in.writerIndex(), CharsetUtil.UTF_8), ctx.channel(), data);
-        }
-
         if (state.get() == null) {
             state.set(new State());
         }
@@ -106,17 +103,13 @@ public class CommandDecoder extends ReplayingDecoder<State> {
 
         if (data == null) {
             while (in.writerIndex() > in.readerIndex()) {
-                in.markReaderIndex();
                 skipCommand(in);
-                in.resetReaderIndex();
-                
+
                 decode(ctx, in, data);
             }
         } else {
             if (!(data instanceof CommandsData)) {
-                in.markReaderIndex();
                 skipCommand(in);
-                in.resetReaderIndex();
             }
             
             decode(ctx, in, data);
@@ -124,6 +117,10 @@ public class CommandDecoder extends ReplayingDecoder<State> {
     }
 
     private void decode(ChannelHandlerContext ctx, ByteBuf in, QueueCommand data) throws Exception {
+        if (log.isTraceEnabled()) {
+            log.trace("reply: {}, channel: {}, command: {}", in.toString(0, in.writerIndex(), CharsetUtil.UTF_8), ctx.channel(), data);
+        }
+
         if (decodeInExecutor && !(data instanceof CommandsData)) {
             ByteBuf copy = in.copy(in.readerIndex(), in.writerIndex() - in.readerIndex());
             in.skipBytes(in.writerIndex() - in.readerIndex());
@@ -155,7 +152,9 @@ public class CommandDecoder extends ReplayingDecoder<State> {
     }
     
     protected void skipCommand(ByteBuf in) throws Exception {
+        in.markReaderIndex();
         skipDecode(in);
+        in.resetReaderIndex();
     }
     
     protected void skipDecode(ByteBuf in) throws IOException{
@@ -245,9 +244,7 @@ public class CommandDecoder extends ReplayingDecoder<State> {
                 checkpoint();
                 state.get().setBatchIndex(i);
                 
-                in.markReaderIndex();
                 skipCommand(in);
-                in.resetReaderIndex();
                 
                 RedisCommand<?> cmd = commandBatch.getCommands().get(i).getCommand();
                 boolean skipConvertor = commandBatch.isQueued();
@@ -350,6 +347,9 @@ public class CommandDecoder extends ReplayingDecoder<State> {
             } else if (error.contains("-OOM ")) {
                 data.tryFailure(new RedisOutOfMemoryException(error.split("-OOM ")[1]
                         + ". channel: " + channel + " data: " + data));
+            } else if (error.startsWith("NOAUTH")) {
+                data.tryFailure(new RedisAuthRequiredException(error
+                        + ". channel: " + channel + " data: " + data));
             } else {
                 if (data != null) {
                     data.tryFailure(new RedisException(error + ". channel: " + channel + " command: " + LogHelper.toString(data)));
@@ -442,7 +442,7 @@ public class CommandDecoder extends ReplayingDecoder<State> {
 
     protected void completeResponse(CommandData<Object, Object> data, Object result, Channel channel) {
         if (data != null && !data.getPromise().trySuccess(result) && data.cause() instanceof RedisTimeoutException) {
-            log.warn("response has been skipped due to timeout! channel: {}, command: {}, result: {}", channel, LogHelper.toString(data), LogHelper.toString(result));
+            log.warn("response has been skipped due to timeout! channel: {}, command: {}", channel, LogHelper.toString(data));
         }
     }
 

@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import org.redisson.api.MapOptions;
 import org.redisson.api.RFuture;
@@ -52,6 +53,7 @@ import org.redisson.client.protocol.decoder.MapScanResult;
 import org.redisson.client.protocol.decoder.ObjectListDecoder;
 import org.redisson.client.protocol.decoder.ObjectMapDecoder;
 import org.redisson.codec.MapCacheEventCodec;
+import org.redisson.codec.MapCacheEventCodec.OSType;
 import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.connection.decoder.MapGetAllDecoder;
 import org.redisson.eviction.EvictionScheduler;
@@ -83,8 +85,8 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
     private EvictionScheduler evictionScheduler;
     
     public RedissonMapCache(EvictionScheduler evictionScheduler, CommandAsyncExecutor commandExecutor,
-                            String name, RedissonClient redisson, MapOptions<K, V> options) {
-        super(commandExecutor, name, redisson, options);
+                            String name, RedissonClient redisson, MapOptions<K, V> options, WriteBehindService writeBehindService) {
+        super(commandExecutor, name, redisson, options, writeBehindService);
         if (evictionScheduler != null) {
             evictionScheduler.schedule(getName(), getTimeoutSetName(), getIdleSetName(), getExpiredChannelName(), getLastAccessTimeSetName());
         }
@@ -92,8 +94,8 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
     }
 
     public RedissonMapCache(Codec codec, EvictionScheduler evictionScheduler, CommandAsyncExecutor commandExecutor,
-                            String name, RedissonClient redisson, MapOptions<K, V> options) {
-        super(codec, commandExecutor, name, redisson, options);
+                            String name, RedissonClient redisson, MapOptions<K, V> options, WriteBehindService writeBehindService) {
+        super(codec, commandExecutor, name, redisson, options, writeBehindService);
         if (evictionScheduler != null) {
             evictionScheduler.schedule(getName(), getTimeoutSetName(), getIdleSetName(), getExpiredChannelName(), getLastAccessTimeSetName());
         }
@@ -394,18 +396,8 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             return future;
         }
 
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
-            @Override
-            protected void execute() {
-                options.getWriter().write(key, value);
-            }
-
-            @Override
-            protected boolean condition(V res) {
-                return res == null;
-            }
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add task = new MapWriterTask.Add(key, value);
+        return mapWriterFuture(future, task, r -> r == null);
     }
 
     @Override
@@ -635,12 +627,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             return future;
         }
 
-        MapWriterTask<Void> listener = new MapWriterTask<Void>() {
-            @Override
-            public void execute() {
-                options.getWriter().writeAll((Map<K, V>) map);
-            }
-        };
+        MapWriterTask listener = new MapWriterTask.Add(map);
         return mapWriterFuture(future, listener);
     }
 
@@ -764,13 +751,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             return future;
         }
 
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            protected void execute() {
-                options.getWriter().write(key, value);
-            }
-        };
-        return mapWriterFuture(future, listener);
+        return mapWriterFuture(future, new MapWriterTask.Add(key, value));
     }
 
     protected RFuture<Boolean> fastPutOperationAsync(K key, V value, long ttl, TimeUnit ttlUnit, long maxIdleTime, TimeUnit maxIdleUnit) {
@@ -915,12 +896,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             return future;
         }
 
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
-            @Override
-            protected void execute() {
-                options.getWriter().write(key, value);
-            }
-        };
+        MapWriterTask.Add listener = new MapWriterTask.Add(key, value);
         return mapWriterFuture(future, listener);
     }
 
@@ -1599,17 +1575,8 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             return future;
         }
 
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            protected void execute() {
-                options.getWriter().write(key, value);
-            }
-            @Override
-            protected boolean condition(Boolean res) {
-                return res;
-            }
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add listener = new MapWriterTask.Add(key, value);
+        return mapWriterFuture(future, listener, Function.identity());
     }
 
     @Override
@@ -1893,7 +1860,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             params.toArray());
     }
 
-    private Boolean isWindows;
+    private MapCacheEventCodec.OSType osType;
     
     @Override
     public int addListener(MapEntryListener listener) {
@@ -1901,15 +1868,19 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
             throw new NullPointerException();
         }
         
-        if (isWindows == null) {
+        if (osType == null) {
             RFuture<Map<String, String>> serverFuture = commandExecutor.readAsync((String) null, StringCodec.INSTANCE, RedisCommands.INFO_SERVER);
             serverFuture.syncUninterruptibly();
             String os = serverFuture.getNow().get("os");
-            isWindows = os.contains("Windows");
+            if (os.contains("Windows")) {
+                osType = OSType.WINDOWS;
+            } else if (os.contains("NONSTOP")) {
+                osType = OSType.HPNONSTOP;
+            }
         }
 
         if (listener instanceof EntryRemovedListener) {
-            RTopic topic = redisson.getTopic(getRemovedChannelName(), new MapCacheEventCodec(codec, isWindows));
+            RTopic topic = redisson.getTopic(getRemovedChannelName(), new MapCacheEventCodec(codec, osType));
             return topic.addListener(List.class, new MessageListener<List<Object>>() {
                 @Override
                 public void onMessage(CharSequence channel, List<Object> msg) {
@@ -1920,7 +1891,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
         }
 
         if (listener instanceof EntryCreatedListener) {
-            RTopic topic = redisson.getTopic(getCreatedChannelName(), new MapCacheEventCodec(codec, isWindows));
+            RTopic topic = redisson.getTopic(getCreatedChannelName(), new MapCacheEventCodec(codec, osType));
             return topic.addListener(List.class, new MessageListener<List<Object>>() {
                 @Override
                 public void onMessage(CharSequence channel, List<Object> msg) {
@@ -1931,7 +1902,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
         }
 
         if (listener instanceof EntryUpdatedListener) {
-            RTopic topic = redisson.getTopic(getUpdatedChannelName(), new MapCacheEventCodec(codec, isWindows));
+            RTopic topic = redisson.getTopic(getUpdatedChannelName(), new MapCacheEventCodec(codec, osType));
             return topic.addListener(List.class, new MessageListener<List<Object>>() {
                 @Override
                 public void onMessage(CharSequence channel, List<Object> msg) {
@@ -1942,7 +1913,7 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
         }
 
         if (listener instanceof EntryExpiredListener) {
-            RTopic topic = redisson.getTopic(getExpiredChannelName(), new MapCacheEventCodec(codec, isWindows));
+            RTopic topic = redisson.getTopic(getExpiredChannelName(), new MapCacheEventCodec(codec, osType));
             return topic.addListener(List.class, new MessageListener<List<Object>>() {
                 @Override
                 public void onMessage(CharSequence channel, List<Object> msg) {
@@ -1957,6 +1928,8 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
 
     @Override
     public void removeListener(int listenerId) {
+        super.removeListener(listenerId);
+        
         RTopic removedTopic = redisson.getTopic(getRemovedChannelName());
         removedTopic.removeListener(listenerId);
 
@@ -2162,6 +2135,9 @@ public class RedissonMapCache<K, V> extends RedissonMap<K, V> implements RMapCac
     public void destroy() {
         if (evictionScheduler != null) {
             evictionScheduler.remove(getName());
+        }
+        if (writeBehindService != null) {
+            writeBehindService.stop(getName());
         }
     }
 }

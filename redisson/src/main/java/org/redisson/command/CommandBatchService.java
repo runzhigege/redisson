@@ -188,7 +188,7 @@ public class CommandBatchService extends CommandAsyncService {
     AsyncSemaphore semaphore = new AsyncSemaphore(0);
     
     @Override
-    protected <R> RPromise<R> createPromise() {
+    public <R> RPromise<R> createPromise() {
         if (isRedisBasedQueue()) {
             return new BatchPromise<R>(executed);
         }
@@ -734,14 +734,14 @@ public class CommandBatchService extends CommandAsyncService {
             if (e instanceof RedisMovedException) {
                 RedisMovedException ex = (RedisMovedException) e;
                 entry.clearErrors();
-                NodeSource nodeSource = new NodeSource(ex.getSlot(), ex.getUrl(), Redirect.MOVED);
+                NodeSource nodeSource = new NodeSource(ex.getSlot(), connectionManager.applyNatMap(ex.getUrl()), Redirect.MOVED);
                 execute(entry, nodeSource, mainPromise, slots, attempt, options);
                 return;
             }
             if (e instanceof RedisAskException) {
                 RedisAskException ex = (RedisAskException) e;
                 entry.clearErrors();
-                NodeSource nodeSource = new NodeSource(ex.getSlot(), ex.getUrl(), Redirect.ASK);
+                NodeSource nodeSource = new NodeSource(ex.getSlot(), connectionManager.applyNatMap(ex.getUrl()), Redirect.ASK);
                 execute(entry, nodeSource, mainPromise, slots, attempt, options);
                 return;
             }

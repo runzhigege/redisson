@@ -27,10 +27,9 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 import org.redisson.api.MapOptions;
 import org.redisson.api.MapOptions.WriteMode;
@@ -55,7 +54,6 @@ import org.redisson.client.protocol.decoder.MapScanResult;
 import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.connection.decoder.MapGetAllDecoder;
 import org.redisson.mapreduce.RedissonMapReduce;
-import org.redisson.misc.Hash;
 import org.redisson.misc.RPromise;
 import org.redisson.misc.RedissonPromise;
 import org.slf4j.Logger;
@@ -76,81 +74,76 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
 
     private final Logger log = LoggerFactory.getLogger(getClass());
     
-    final AtomicInteger writeBehindCurrentThreads = new AtomicInteger();
-    final Queue<Runnable> writeBehindTasks;
     final RedissonClient redisson;
     final MapOptions<K, V> options;
+    final WriteBehindService writeBehindService;
+    final MapWriteBehindTask writeBehindTask;
     
-    public RedissonMap(CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson, MapOptions<K, V> options) {
+    public RedissonMap(CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson, MapOptions<K, V> options, WriteBehindService writeBehindService) {
         super(commandExecutor, name);
         this.redisson = redisson;
         this.options = options;
         if (options != null && options.getWriteMode() == WriteMode.WRITE_BEHIND) {
-            writeBehindTasks = new ConcurrentLinkedQueue<Runnable>();
+            this.writeBehindService = writeBehindService;
+            writeBehindTask = writeBehindService.start(name, options);
         } else {
-            writeBehindTasks = null;
+            this.writeBehindService = null;
+            writeBehindTask = null;
         }
     }
 
-    public RedissonMap(Codec codec, CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson, MapOptions<K, V> options) {
+    public RedissonMap(Codec codec, CommandAsyncExecutor commandExecutor, String name, RedissonClient redisson, MapOptions<K, V> options, WriteBehindService writeBehindService) {
         super(codec, commandExecutor, name);
         this.redisson = redisson;
         this.options = options;
         if (options != null && options.getWriteMode() == WriteMode.WRITE_BEHIND) {
-            writeBehindTasks = new ConcurrentLinkedQueue<Runnable>();
+            this.writeBehindService = writeBehindService;
+            writeBehindTask = writeBehindService.start(name, options);
         } else {
-            writeBehindTasks = null;
+            this.writeBehindService = null;
+            writeBehindTask = null;
         }
     }
     
     @Override
     public <KOut, VOut> RMapReduce<K, V, KOut, VOut> mapReduce() {
-        return new RedissonMapReduce<K, V, KOut, VOut>(this, redisson, commandExecutor.getConnectionManager());
+        return new RedissonMapReduce<>(this, redisson, commandExecutor.getConnectionManager());
     }
     
     @Override
     public RPermitExpirableSemaphore getPermitExpirableSemaphore(K key) {
-        String lockName = getLockName(key, "permitexpirablesemaphore");
-        return new RedissonPermitExpirableSemaphore(commandExecutor, lockName, ((Redisson) redisson).getSemaphorePubSub());
+        String lockName = getLockByMapKey(key, "permitexpirablesemaphore");
+        return new RedissonPermitExpirableSemaphore(commandExecutor, lockName);
     }
 
     @Override
     public RSemaphore getSemaphore(K key) {
-        String lockName = getLockName(key, "semaphore");
-        return new RedissonSemaphore(commandExecutor, lockName, ((Redisson) redisson).getSemaphorePubSub());
+        String lockName = getLockByMapKey(key, "semaphore");
+        return new RedissonSemaphore(commandExecutor, lockName);
     }
     
     @Override
     public RCountDownLatch getCountDownLatch(K key) {
-        String lockName = getLockName(key, "countdownlatch");
+        String lockName = getLockByMapKey(key, "countdownlatch");
         return new RedissonCountDownLatch(commandExecutor, lockName);
     }
     
     @Override
     public RLock getFairLock(K key) {
-        String lockName = getLockName(key, "fairlock");
+        String lockName = getLockByMapKey(key, "fairlock");
         return new RedissonFairLock(commandExecutor, lockName);
     }
     
     @Override
     public RLock getLock(K key) {
-        String lockName = getLockName(key, "lock");
+        String lockName = getLockByMapKey(key, "lock");
         return new RedissonLock(commandExecutor, lockName);
     }
     
     @Override
     public RReadWriteLock getReadWriteLock(K key) {
-        String lockName = getLockName(key, "rw_lock");
+        String lockName = getLockByMapKey(key, "rw_lock");
         return new RedissonReadWriteLock(commandExecutor, lockName);
-    }
-    
-    public String getLockName(Object key, String suffix) {
-        ByteBuf keyState = encodeMapKey(key);
-        try {
-            return suffixName(getName(key), Hash.hash128toBase64(keyState) + ":" + suffix);
-        } finally {
-            keyState.release();
-        }
     }
     
     @Override
@@ -215,7 +208,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                             + "end "
                        + "end;" +
                      "return 0",
-                Collections.<Object>singletonList(getName()), encodeMapValue(value));
+                Collections.singletonList(getName()), encodeMapValue(value));
     }
 
     @Override
@@ -226,7 +219,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     @Override
     public RFuture<Map<K, V>> getAllAsync(Set<K> keys) {
         if (keys.isEmpty()) {
-            return RedissonPromise.newSucceededFuture(Collections.<K, V>emptyMap());
+            return RedissonPromise.newSucceededFuture(Collections.emptyMap());
         }
 
         RFuture<Map<K, V>> future = getAllOperationAsync(keys);
@@ -234,7 +227,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
 
-        RPromise<Map<K, V>> result = new RedissonPromise<Map<K, V>>();
+        RPromise<Map<K, V>> result = new RedissonPromise<>();
         future.onComplete((res, e) -> {
             if (e != null) {
                 result.tryFailure(e);
@@ -260,10 +253,10 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     }
 
     public RFuture<Map<K, V>> getAllOperationAsync(Set<K> keys) {
-        List<Object> args = new ArrayList<Object>(keys.size() + 1);
+        List<Object> args = new ArrayList<>(keys.size() + 1);
         args.add(getName());
         encodeMapKeys(args, keys);
-        RFuture<Map<K, V>> future = commandExecutor.readAsync(getName(), codec, new RedisCommand<Map<Object, Object>>("HMGET", new MapGetAllDecoder(new ArrayList<Object>(keys), 0), ValueType.MAP_VALUE), 
+        RFuture<Map<K, V>> future = commandExecutor.readAsync(getName(), codec, new RedisCommand<>("HMGET", new MapGetAllDecoder(new ArrayList<>(keys), 0), ValueType.MAP_VALUE), 
                 args.toArray());
         return future;
     }
@@ -299,7 +292,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
         AtomicInteger counter = new AtomicInteger();
         Iterator<Entry<K, V>> iter = ((Map<K, V>) map).entrySet().iterator();
         
-        RPromise<Void> promise = new RedissonPromise<Void>();
+        RPromise<Void> promise = new RedissonPromise<>();
         putAllAsync(batch, iter, counter, batchSize, promise);
         return promise;
     }
@@ -353,40 +346,43 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<Void> listener = new MapWriterTask<Void>() {
-            @Override
-            public void execute() {
-                options.getWriter().writeAll((Map<K, V>) map);
-            }
-        };
-        return mapWriterFuture(future, listener);
+        return mapWriterFuture(future, new MapWriterTask.Add(map));
     }
 
-    protected final <M> RFuture<M> mapWriterFuture(RFuture<M> future, MapWriterTask<M> listener) {
+    protected final <M> RFuture<M> mapWriterFuture(RFuture<M> future, MapWriterTask task) {
+        return mapWriterFuture(future, task, r -> true);
+    }
+    
+    protected final <M> RFuture<M> mapWriterFuture(RFuture<M> future, MapWriterTask task, Function<M, Boolean> condition) {
         if (options != null && options.getWriteMode() == WriteMode.WRITE_BEHIND) {
-            future.onComplete(new MapWriteBehindListener<M>(commandExecutor, listener, writeBehindCurrentThreads, writeBehindTasks, options.getWriteBehindThreads()));
+            future.onComplete((res, e) -> {
+                if (e == null && condition.apply(res)) {
+                    writeBehindTask.addTask(task);
+                }
+            });
             return future;
         }        
 
-        final RPromise<M> promise = new RedissonPromise<M>();
+        final RPromise<M> promise = new RedissonPromise<>();
         future.onComplete((res, e) -> {
             if (e != null) {
                 promise.tryFailure(e);
                 return;
             }
 
-            if (listener.condition(res)) {
-                commandExecutor.getConnectionManager().getExecutor().execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            listener.execute();
-                        } catch (Exception e) {
-                            promise.tryFailure(e);
-                            return;
+            if (condition.apply(res)) {
+                commandExecutor.getConnectionManager().getExecutor().execute(() -> {
+                    try {
+                        if (task instanceof MapWriterTask.Add) {
+                            options.getWriter().write(task.getMap());
+                        } else {
+                            options.getWriter().delete(task.getKeys());
                         }
-                        promise.trySuccess(res);
+                    } catch (Exception ex) {
+                        promise.tryFailure(ex);
+                        return;
                     }
+                    promise.trySuccess(res);
                 });
             } else {
                 promise.trySuccess(res);
@@ -397,7 +393,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     }
 
     protected RFuture<Void> putAllOperationAsync(Map<? extends K, ? extends V> map) {
-        List<Object> params = new ArrayList<Object>(map.size()*2 + 1);
+        List<Object> params = new ArrayList<>(map.size()*2 + 1);
         params.add(getName());
         for (java.util.Map.Entry<? extends K, ? extends V> t : map.entrySet()) {
             checkKey(t.getKey());
@@ -532,19 +528,8 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, value);
-            }
-            
-            @Override
-            protected boolean condition(V res) {
-                return res == null;
-            }
-
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add task = new MapWriterTask.Add(key, value);
+        return mapWriterFuture(future, task, r -> r == null);
     }
 
     protected boolean hasNoWriter() {
@@ -558,7 +543,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 + "else "
                     + "return redis.call('hget', KEYS[1], ARGV[1]) "
                 + "end",
-                Collections.<Object>singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
+                Collections.singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
     }
 
     @Override
@@ -576,19 +561,8 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, value);
-            }
-            
-            @Override
-            protected boolean condition(Boolean res) {
-                return res;
-            }
-
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add task = new MapWriterTask.Add(key, value);
+        return mapWriterFuture(future, task, Function.identity());
     }
 
     protected RFuture<Boolean> fastPutIfAbsentOperationAsync(K key, V value) {
@@ -610,19 +584,8 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            public void execute() {
-                options.getWriter().delete((K) key);
-            }
-            
-            @Override
-            protected boolean condition(Boolean res) {
-                return res;
-            }
-
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Remove listener = new MapWriterTask.Remove(key);
+        return mapWriterFuture(future, listener, Function.identity());
     }
 
     protected RFuture<Boolean> removeOperationAsync(Object key, Object value) {
@@ -632,7 +595,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 + "else "
                     + "return 0 "
                 + "end",
-            Collections.<Object>singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
+            Collections.singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
         return future;
     }
 
@@ -662,19 +625,8 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, newValue);
-            }
-            
-            @Override
-            protected boolean condition(Boolean res) {
-                return res;
-            }
-
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add task = new MapWriterTask.Add(key, newValue);
+        return mapWriterFuture(future, task, Function.identity());
     }
 
     protected RFuture<Boolean> replaceOperationAsync(K key, V oldValue, V newValue) {
@@ -685,7 +637,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 + "else "
                     + "return 0; "
                 + "end",
-                Collections.<Object>singletonList(getName(key)), encodeMapKey(key), encodeMapValue(oldValue), encodeMapValue(newValue));
+                Collections.singletonList(getName(key)), encodeMapKey(key), encodeMapValue(oldValue), encodeMapValue(newValue));
     }
 
     @Override
@@ -703,19 +655,8 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, value);
-            }
-            
-            @Override
-            protected boolean condition(V res) {
-                return res != null;
-            }
-
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add task = new MapWriterTask.Add(key, value);
+        return mapWriterFuture(future, task, r -> r != null);
     }
 
     protected RFuture<V> replaceOperationAsync(K key, V value) {
@@ -727,7 +668,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 + "else "
                     + "return nil; "
                 + "end",
-            Collections.<Object>singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
+            Collections.singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
     }
     
     @Override
@@ -745,18 +686,8 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, value);
-            }
-            
-            @Override
-            protected boolean condition(Boolean res) {
-                return res;
-            }
-        };
-        return mapWriterFuture(future, listener);
+        MapWriterTask.Add task = new MapWriterTask.Add(key, value);
+        return mapWriterFuture(future, task, Function.identity());
     }
 
     protected RFuture<Boolean> fastReplaceOperationAsync(K key, V value) {
@@ -767,7 +698,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 + "else "
                     + "return 0; "
                 + "end",
-            Collections.<Object>singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
+            Collections.singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
     }
     
 
@@ -784,7 +715,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        RPromise<V> result = new RedissonPromise<V>();
+        RPromise<V> result = new RedissonPromise<>();
         future.onComplete((res, e) -> {
             if (e != null) {
                 result.tryFailure(e);
@@ -840,7 +771,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             checkKey(key);
         }
  
-        RPromise<Void> result = new RedissonPromise<Void>();
+        RPromise<Void> result = new RedissonPromise<>();
         AtomicInteger counter = new AtomicInteger();
         try {
             Iterator<? extends K> iter = keys.iterator();
@@ -877,7 +808,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             }
             
             if (!res) {
-                RPromise<V> promise = new RedissonPromise<V>();
+                RPromise<V> promise = new RedissonPromise<>();
                 promise.onComplete((r, ex) -> {
                     if (ex != null) {
                         result.tryFailure(ex);
@@ -916,7 +847,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     
     private void loadValue(RPromise<Void> result, AtomicInteger counter, Iterator<? extends K> iter,
                                 K k, Map<K, V> loadedEntires) {
-        RPromise<V> promise = new RedissonPromise<V>();
+        RPromise<V> promise = new RedissonPromise<>();
         promise.onComplete((res, e) -> {
             if (e != null) {
                 result.tryFailure(e);
@@ -955,13 +886,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, value);
-            }
-        };
-        return mapWriterFuture(future, listener);
+        return mapWriterFuture(future, new MapWriterTask.Add(key, value));
     }
 
     protected RFuture<V> putOperationAsync(K key, V value) {
@@ -969,7 +894,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 "local v = redis.call('hget', KEYS[1], ARGV[1]); "
                 + "redis.call('hset', KEYS[1], ARGV[1], ARGV[2]); "
                 + "return v",
-                Collections.<Object>singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
+                Collections.singletonList(getName(key)), encodeMapKey(key), encodeMapValue(value));
     }
 
 
@@ -982,13 +907,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
-            @Override
-            public void execute() {
-                options.getWriter().delete(key);
-            }
-        };
-        return mapWriterFuture(future, listener);
+        return mapWriterFuture(future, new MapWriterTask.Remove(key));
     }
 
     protected RFuture<V> removeOperationAsync(K key) {
@@ -996,7 +915,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                 "local v = redis.call('hget', KEYS[1], ARGV[1]); "
                 + "redis.call('hdel', KEYS[1], ARGV[1]); "
                 + "return v",
-                Collections.<Object>singletonList(getName(key)), encodeMapKey(key));
+                Collections.singletonList(getName(key)), encodeMapKey(key));
     }
 
     @Override
@@ -1009,13 +928,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
         
-        MapWriterTask<Boolean> listener = new MapWriterTask<Boolean>() {
-            @Override
-            public void execute() {
-                options.getWriter().write(key, value);
-            }
-        };
-        return mapWriterFuture(future, listener);
+        return mapWriterFuture(future, new MapWriterTask.Add(key, value));
     }
 
     protected RFuture<Boolean> fastPutOperationAsync(K key, V value) {
@@ -1042,7 +955,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
         }
 
         RFuture<List<Long>> future = fastRemoveOperationBatchAsync(keys);            
-        RPromise<Long> result = new RedissonPromise<Long>();
+        RPromise<Long> result = new RedissonPromise<>();
         future.onComplete((res, e) -> {
             if (e != null) {
                 result.tryFailure(e);
@@ -1064,20 +977,12 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             if (options.getWriteMode() == WriteMode.WRITE_BEHIND) {
                 result.trySuccess((long) deletedKeys.size());
                 
-                MapWriterTask<List<Long>> listener = new MapWriterTask<List<Long>>() {
-                    @Override
-                    public void execute() {
-                        options.getWriter().deleteAll(deletedKeys);
-                    }
-                };
-                future.onComplete(new MapWriteBehindListener<List<Long>>(commandExecutor, listener, writeBehindCurrentThreads, writeBehindTasks, options.getWriteBehindThreads()));
+                MapWriterTask.Remove task = new MapWriterTask.Remove(deletedKeys);
+                writeBehindTask.addTask(task);
             } else {
-                commandExecutor.getConnectionManager().getExecutor().execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        options.getWriter().deleteAll(deletedKeys);
-                        result.trySuccess((long) deletedKeys.size());
-                    }
+                commandExecutor.getConnectionManager().getExecutor().execute(() -> {
+                    options.getWriter().delete(deletedKeys);
+                    result.trySuccess((long) deletedKeys.size());
                 });
             }
         });
@@ -1085,7 +990,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     }
 
     protected RFuture<List<Long>> fastRemoveOperationBatchAsync(K... keys) {
-        List<Object> args = new ArrayList<Object>(keys.length);
+        List<Object> args = new ArrayList<>(keys.length);
         for (K key : keys) {
             args.add(encodeMapKey(key));
         }
@@ -1097,13 +1002,13 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
                         + "table.insert(result, val); "
                       + "end;"
                       + "return result;",
-                        Arrays.<Object>asList(getName()), 
+                        Arrays.asList(getName()), 
                         args.toArray());
         return future;
     }
 
     protected RFuture<Long> fastRemoveOperationAsync(K... keys) {
-        List<Object> args = new ArrayList<Object>(keys.length + 1);
+        List<Object> args = new ArrayList<>(keys.length + 1);
         args.add(getName());
         for (K key : keys) {
             args.add(encodeMapKey(key));
@@ -1147,20 +1052,18 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
             return future;
         }
 
-        MapWriterTask<V> listener = new MapWriterTask<V>() {
+        return mapWriterFuture(future, new MapWriterTask.Add() {
             @Override
-            public void execute() {
-                options.getWriter().write(key, future.getNow());
+            public Map<K, V> getMap() {
+                return Collections.singletonMap(key, future.getNow());
             }
-        };
-        
-        return mapWriterFuture(future, listener);
+        });
     }
 
     protected RFuture<V> addAndGetOperationAsync(K key, Number value) {
         ByteBuf keyState = encodeMapKey(key);
         RFuture<V> future = commandExecutor.writeAsync(getName(key), StringCodec.INSTANCE,
-                new RedisCommand<Object>("HINCRBYFLOAT", new NumberConvertor(value.getClass())),
+                new RedisCommand<>("HINCRBYFLOAT", new NumberConvertor(value.getClass())),
                 getName(key), keyState, new BigDecimal(value.toString()).toPlainString());
         return future;
     }
@@ -1312,7 +1215,7 @@ public class RedissonMap<K, V> extends RedissonExpirable implements RMap<K, V> {
     }
 
     protected Iterator<Map.Entry<K, V>> entryIterator(String pattern, int count) {
-        return new RedissonMapIterator<Map.Entry<K, V>>(RedissonMap.this, pattern, count);
+        return new RedissonMapIterator<>(RedissonMap.this, pattern, count);
     }
 
     private void loadValue(K key, RPromise<V> result, boolean replaceValue) {

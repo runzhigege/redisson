@@ -129,6 +129,22 @@ public interface RedissonReactiveClient {
     RLockReactive getLock(String name);
     
     /**
+     * Returns MultiLock instance associated with specified <code>locks</code>
+     * 
+     * @param locks - collection of locks
+     * @return MultiLock object
+     */
+    RLockReactive getMultiLock(RLock... locks);
+    
+    /**
+     * Returns RedLock instance associated with specified <code>locks</code>
+     * 
+     * @param locks - collection of locks
+     * @return RedLock object
+     */
+    RLockReactive getRedLock(RLock... locks);
+    
+    /**
      * Returns set-based cache instance by <code>name</code>.
      * Supports value eviction with a given TTL value.
      *
@@ -566,6 +582,40 @@ public interface RedissonReactiveClient {
     RAtomicDoubleReactive getAtomicDouble(String name);
 
     /**
+     * Returns object for remote operations prefixed with the default name (redisson_remote_service)
+     * 
+     * @return RemoteService object
+     */
+    RRemoteService getRemoteService();
+    
+    /**
+     * Returns object for remote operations prefixed with the default name (redisson_remote_service)
+     * and uses provided codec for method arguments and result.
+     * 
+     * @param codec - codec for response and request
+     * @return RemoteService object
+     */
+    RRemoteService getRemoteService(Codec codec);
+
+    /**
+     * Returns object for remote operations prefixed with the specified name
+     *
+     * @param name - the name used as the Redis key prefix for the services
+     * @return RemoteService object
+     */
+    RRemoteService getRemoteService(String name);
+    
+    /**
+     * Returns object for remote operations prefixed with the specified name
+     * and uses provided codec for method arguments and result.
+     *
+     * @param name - the name used as the Redis key prefix for the services
+     * @param codec - codec for response and request
+     * @return RemoteService object
+     */
+    RRemoteService getRemoteService(String name, Codec codec);
+    
+    /**
      * Returns bitSet instance by name.
      *
      * @param name - name of object
@@ -607,10 +657,14 @@ public interface RedissonReactiveClient {
      */
     RBatchReactive createBatch(BatchOptions options);
 
-    /*
-     * Use createBatch(BatchOptions)
+    /**
+     * Return batch object which executes group of
+     * command in pipeline.
+     *
+     * See <a href="http://redis.io/topics/pipelining">http://redis.io/topics/pipelining</a>
+     *
+     * @return Batch object
      */
-    @Deprecated
     RBatchReactive createBatch();
 
     /**

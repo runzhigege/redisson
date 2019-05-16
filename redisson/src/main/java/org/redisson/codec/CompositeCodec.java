@@ -42,7 +42,7 @@ public class CompositeCodec implements Codec {
         this.valueCodec = valueCodec;
     }
 
-    public CompositeCodec(ClassLoader classLoader, CompositeCodec codec) {
+    public CompositeCodec(ClassLoader classLoader, CompositeCodec codec) throws ReflectiveOperationException {
         super();
         this.mapKeyCodec = BaseCodec.copy(classLoader, codec.mapKeyCodec);
         this.mapValueCodec = BaseCodec.copy(classLoader, codec.mapValueCodec);
@@ -51,7 +51,7 @@ public class CompositeCodec implements Codec {
     
     @Override
     public Decoder<Object> getMapValueDecoder() {
-        return mapValueCodec.getMapKeyDecoder();
+        return mapValueCodec.getMapValueDecoder();
     }
 
     @Override

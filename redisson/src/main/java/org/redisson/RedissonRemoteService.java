@@ -31,16 +31,15 @@ import org.redisson.api.RFuture;
 import org.redisson.api.RList;
 import org.redisson.api.RMap;
 import org.redisson.api.RRemoteService;
-import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.codec.LongCodec;
 import org.redisson.client.codec.StringCodec;
 import org.redisson.client.protocol.RedisCommands;
-import org.redisson.codec.CompositeCodec;
-import org.redisson.command.CommandExecutor;
+import org.redisson.command.CommandAsyncExecutor;
 import org.redisson.executor.RemotePromise;
 import org.redisson.misc.RPromise;
 import org.redisson.misc.RedissonPromise;
+import org.redisson.remote.BaseRemoteService;
 import org.redisson.remote.RRemoteServiceResponse;
 import org.redisson.remote.RemoteServiceAck;
 import org.redisson.remote.RemoteServiceCancelRequest;
@@ -89,8 +88,8 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
     private final Map<RemoteServiceKey, RemoteServiceMethod> beans = new ConcurrentHashMap<>();
     private final Map<Class<?>, Entry> remoteMap = new ConcurrentHashMap<>();
 
-    public RedissonRemoteService(Codec codec, RedissonClient redisson, String name, CommandExecutor commandExecutor, String executorId, ConcurrentMap<String, ResponseEntry> responses) {
-        super(codec, redisson, name, commandExecutor, executorId, responses);
+    public RedissonRemoteService(Codec codec, String name, CommandAsyncExecutor commandExecutor, String executorId, ConcurrentMap<String, ResponseEntry> responses) {
+        super(codec, name, commandExecutor, executorId, responses);
     }
     
     @Override
@@ -125,7 +124,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
     @Override
     public <T> void deregister(Class<T> remoteInterface) {
         for (Method method : remoteInterface.getMethods()) {
-            RemoteServiceKey key = new RemoteServiceKey(remoteInterface, method.getName(), getMethodSignatures(method));
+            RemoteServiceKey key = new RemoteServiceKey(remoteInterface, method.getName(), getMethodSignature(method));
             beans.remove(key);
         }
         
@@ -149,6 +148,10 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
         register(remoteInterface, object, workers, commandExecutor.getConnectionManager().getExecutor());
     }
 
+    private <V> RBlockingQueue<V> getBlockingQueue(String name, Codec codec) {
+        return new RedissonBlockingQueue<V>(codec, commandExecutor, name, null);
+    }
+    
     @Override
     public <T> void register(Class<T> remoteInterface, T object, int workers, ExecutorService executor) {
         if (workers < 1) {
@@ -156,7 +159,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
         }
         for (Method method : remoteInterface.getMethods()) {
             RemoteServiceMethod value = new RemoteServiceMethod(method, object);
-            RemoteServiceKey key = new RemoteServiceKey(remoteInterface, method.getName(), getMethodSignatures(method));
+            RemoteServiceKey key = new RemoteServiceKey(remoteInterface, method.getName(), getMethodSignature(method));
             if (beans.put(key, value) != null) {
                 return;
             }
@@ -165,10 +168,10 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
         remoteMap.put(remoteInterface, new Entry(workers));
         
         String requestQueueName = getRequestQueueName(remoteInterface);
-        RBlockingQueue<String> requestQueue = redisson.getBlockingQueue(requestQueueName, StringCodec.INSTANCE);
+        RBlockingQueue<String> requestQueue = getBlockingQueue(requestQueueName, StringCodec.INSTANCE);
         subscribe(remoteInterface, requestQueue, executor);
     }
-
+    
     private <T> void subscribe(Class<T> remoteInterface, RBlockingQueue<String> requestQueue,
             ExecutorService executor) {
         Entry entry = remoteMap.get(remoteInterface);
@@ -184,8 +187,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
                 }
                 
                 if (e != null) {
-                    if (e instanceof RedissonShutdownException
-                            || redisson.isShuttingDown()) {
+                    if (e instanceof RedissonShutdownException) {
                         return;
                     }
                     log.error("Can't process the remote service request.", e);
@@ -206,7 +208,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
                     subscribe(remoteInterface, requestQueue, executor);
                 }
 
-                RMap<String, RemoteServiceRequest> tasks = redisson.getMap(requestQueue.getName() + ":tasks", new CompositeCodec(StringCodec.INSTANCE, codec, codec));
+                RMap<String, RemoteServiceRequest> tasks = getMap(requestQueue.getName() + ":tasks");
                 RFuture<RemoteServiceRequest> taskFuture = getTask(requestId, tasks);
                 taskFuture.onComplete((request, exc) -> {
                     if (exc != null) {
@@ -276,7 +278,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
                                     }
                                     
 
-                                    RList<Object> list = redisson.getList(responseName, codec);
+                                    RList<Object> list = new RedissonList<>(codec, commandExecutor, responseName, null);
                                     RFuture<Boolean> addFuture = list.addAsync(new RemoteServiceAck(request.getId()));
                                     addFuture.onComplete((res, exce) -> {
                                         if (exce != null) {
@@ -307,7 +309,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
     
     private <T> void executeMethod(Class<T> remoteInterface, RBlockingQueue<String> requestQueue,
             ExecutorService executor, RemoteServiceRequest request) {
-        RemoteServiceMethod method = beans.get(new RemoteServiceKey(remoteInterface, request.getMethodName(), request.getSignatures()));
+        RemoteServiceMethod method = beans.get(new RemoteServiceKey(remoteInterface, request.getMethodName(), request.getSignature()));
         String responseName = getResponseQueueName(request.getExecutorId());
         
 
@@ -335,7 +337,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
                 
                 // could be removed not from future object
                 if (r.isSendResponse()) {
-                    RMap<String, RemoteServiceCancelResponse> map = redisson.getMap(cancelResponseMapName, new CompositeCodec(StringCodec.INSTANCE, codec, codec));
+                    RMap<String, RemoteServiceCancelResponse> map = getMap(cancelResponseMapName);
                     map.fastPutAsync(request.getId(), response);
                     map.expireAsync(60, TimeUnit.SECONDS);
                 }
@@ -370,7 +372,7 @@ public class RedissonRemoteService extends BaseRemoteService implements RRemoteS
                 timeout = request.getOptions().getExecutionTimeoutInMillis();
             }
 
-            RBlockingQueueAsync<RRemoteServiceResponse> queue = redisson.getBlockingQueue(responseName, codec);
+            RBlockingQueueAsync<RRemoteServiceResponse> queue = getBlockingQueue(responseName, codec);
             RFuture<Void> clientsFuture = queue.putAsync(responseHolder.get());
             queue.expireAsync(timeout, TimeUnit.MILLISECONDS);
 

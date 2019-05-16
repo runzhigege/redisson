@@ -38,24 +38,30 @@ public class CommandRxService extends CommandAsyncService implements CommandRxEx
     }
 
     @Override
-    public <R> Flowable<R> flowable(final Callable<RFuture<R>> supplier) {
-        final ReplayProcessor<R> p = ReplayProcessor.create();
+    public <R> Flowable<R> flowable(Callable<RFuture<R>> supplier) {
+        ReplayProcessor<R> p = ReplayProcessor.create();
         return p.doOnRequest(new LongConsumer() {
             @Override
             public void accept(long t) throws Exception {
-                RFuture<R> future = supplier.call();
+                RFuture<R> future;
+                try {
+                    future = supplier.call();
+                } catch (Exception e) {
+                    p.onError(e);
+                    return;
+                }
+                p.doOnCancel(new Action() {
+                    @Override
+                    public void run() throws Exception {
+                        future.cancel(true);
+                    }
+                });
+                
                 future.onComplete((res, e) -> {
                    if (e != null) {
                        p.onError(e);
                        return;
                    }
-                   
-                   p.doOnCancel(new Action() {
-                       @Override
-                       public void run() throws Exception {
-                           future.cancel(true);
-                       }
-                   });
                    
                    if (res != null) {
                        p.onNext(res);

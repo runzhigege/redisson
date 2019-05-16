@@ -4,7 +4,76 @@ Redisson Releases History
 
 Сonsider __[Redisson PRO](https://redisson.pro)__ version for advanced features and support by SLA.
 
-### 26-Feb-2018 - versions 3.10.3 released  
+### 29-Apr-2019 - versions 3.10.7 released  
+Feature - Add support for [Reactive and RxJava2 interfaces](https://github.com/redisson/redisson/wiki/9.-distributed-services#913-remote-service-asynchronous-reactive-and-rxjava2-calls) to RemoteService object  
+Feature - MILLISECONDS option added to RRateLimiter.RateIntervalUnit object  
+Feature - range method added to RList, RListReactive and RListRx interfaces  
+Improvement - `JCache.getAll` execution optimization for non-existing keys  
+Improvement - 10X Performance boost for `JCache.putAll` method  
+Fixed - disconnected sentinels shouldn't be used in sentinel list  
+Fixed - Apache Tomcat `RedissonSessionManager` doesn't use classloader aware codec for session Map object (thanks to [jchobantonov](https://github.com/jchobantonov))  
+Fixed - LiveObject field with Map type couldn't be persisted  
+Fixed - `RRateLimiter` allows permits limit exceeding  
+Fixed - `CompositeCodec.getMapValueDecoder` method uses `MapKeyDecoder` instead of `MapValueDecoder`  
+Fixed - memory leak during blocking methods invocation of Queue objects  
+Fixed - Apache Tomcat `RedissonSessionManager.findSession` shouldn't create a new one session (thanks to [jchobantonov](https://github.com/jchobantonov))  
+Fixed - `JCache.removeAll` method doesn't notify Cache listeners  
+Fixed - `UpdateValve` sould be removed from pipeline in Apache Tomcat `RedissonSessionManager.stopInternal` method (thanks to [jchobantonov](https://github.com/jchobantonov))  
+Fixed - Redis Sentinel prior 5.0.1 version doesn't require password. Regression since 3.10.5 version  
+Fixed - Redisson tries to renewed Lock expiration even if lock doesn't exist. Regression since 3.10.5 version  
+Fixed - FstCodec can't deserialize ConcurrentHashMap based object with package visibility  
+
+### 05-Apr-2019 - versions 3.10.6 released  
+Feature - `broadcastSessionEvents` setting added to Tomcat Session Manager  
+Feature - `remainTimeToLive` method added to `RLock`, `RLockAsync`, `RLockRx` and `RLockReactive` interfaces  
+Feature - NAT mapping support for cluster mode  
+Feature - `isLock` method added to `RLockAsync`, `RLockRx`, `RLockReactive` interfaces  
+Feature - `writeBehindDelay` and `writeBehindBatchSize` settings added to `MapOptions` object  
+Improvement - Eviction task logging added  
+Improvement - `MapWriter` interface retains only two methods for handling batch updates  
+Improvement - `MapOptions.writeBehindThreads` parameter removed  
+Fixed - `RBitSet.asBitSet` methods throws NPE if RBitSet object doesn't exist  
+Fixed - `JCache.getAll` method throws `RedisException: too many results to unpack`  
+Fixed - `RLock.lock` method can be interrupted with `Thread.interrupt` method  
+Fixed - Tomcat Session parameters aren't updated completely in `readMode=MEMORY`  
+Fixed - `RLock.unlock` method returns true if lock doesn't exist  
+Fixed - Tomcat Session Manager doesn't remove session attributes in `updateMode=AFTER_REQUEST`  
+Fixed - Pattern topic listeners fail to re-attach on cluster failover (thanks to [shailender-bathula](https://github.com/shailender-bathula))  
+Fixed - `CommandPubSubDecoder.decodeResult` throws `IllegalStateException` in JBOSS environment  
+Fixed - NullValue object shouldn't be stored if `RedissonSpringCacheManager.allowNullValues = false`  
+Fixed - `removeListener` method of `RTopicReactive` and `RTopicRx` interfaces throws NoSuchMethodException  
+
+### 20-Mar-2019 - versions 3.10.5 released  
+Feature - `getMultiLock`, `getRedLock` methods added to `RedissonClient`, `RedissonRxClient` and `RedissonReactiveClient` interfaces  
+Feature - `getInfo`, `listGroups`, `listConsumers` methods added to `RStream`, `RStreamRx`, `RStreamReactive` interfaces  
+Feature - `RPatternTopic.removeListenerAsync` method added  
+Feature - `getAndSet` method with TTL support added `RBucket`, `RBucketAsync`, `RBucketReactive`, `RBucketRx` interfaces  
+Feature - `addListener` and `removeListener` methods added to `RObject`, `RObjectAsync`, `RObjectReactive`, `RObjectRx` objects. It allows to add and remove listeners for Deleted and Expired keyspace events published by Redis  
+Improvement - shuffle list of sentinels to distribute load (thanks to [hrakaroo](https://github.com/hrakaroo))  
+Improvement - methods of RxJava2 interfaces should use full set of result objects: `Single`, `Maybe` or `Completable`  
+Fixed - compatibility with hibernate 5.2.0 - 5.2.4 versions  
+Fixed - ClassCastException during `RBatchReactive` and `RBatchRx` execution in `exectionMode` = `REDIS_WRITE_ATOMIC` or `REDIS_READ_ATOMIC`  
+Fixed - sentinel mode doesn't support AUTH command  
+Fixed - response shouldn't be printed in case of response timeout error  
+Fixed - HP NONSTOP OS is not supported by `MapCacheEventCodec`  
+Fixed - RStream.readGroup method doesn't handle empty result properly with Redis 5.0.3  
+Fixed - AUTH password included in exceptions  
+Fixed - locked lock isn't unlocked after disconnect to Redis  
+
+### 08-Mar-2019 - versions 3.10.4 released  
+Feature - `getCountDownLatch`, `getPermitExpirableSemaphore`, `getSemaphore`, `getFairLock` methods added to `RMultimap` object  
+Feature - `maxCleanUpDelay` and `minCleanUpDelay` settings added to `Config` object  
+Fixed - `RLocalCachedMap.destroy` method doesn't clear local cache  
+Fixed - HP NONSTOP OS is not supported by MapCacheEventCodec  
+Fixed - `RedissonLocalCachedMap.readAll*` methods throw NPE if `evictionPolicy = WEAK` used  
+Fixed - codec provided in Redisson configuration isn't used for attribute messages serialization  
+Fixed - ClassNotFoundException is thrown by Tomcat Session Manager in `readMode = MEMORY`  
+Fixed - fresh Tomcat instance unable to load session stored in Redis  
+Fixed - negative delay shouldn't be allowed to define for `RDelayedQueue.offer` method  
+Fixed - eviction delay for `RMapCache` object is not decreased  
+Fixed - `RMultiLock.tryLockAsync` and `RMultiLock.lockAsync` methods may hang during invcation  
+
+### 26-Feb-2019 - versions 3.10.3 released  
 Feature - `RTransaction.getBuckets` method added  
 Feature - ability to redefine `CacheKeysFactory` in Hibernate Cache Factory  
 Feautre - ability to specify default values for environment variable (thanks to [aaabramov](https://github.com/aaabramov))  
@@ -20,7 +89,7 @@ Fixed - rename and renamenx methods don't change name of current object
 Fixed - performance regression of RBatch result decoding (since 2.12.2 / 3.7.2 version)  
 Fixed - Transactional RBucket object doesn't respect transaction timeout  
 
-### 07-Feb-2018 - versions 2.15.2 and 3.10.2 released  
+### 07-Feb-2019 - versions 2.15.2 and 3.10.2 released  
 Feature - `StreamMessageId.NEVER_DELIVERED` added  
 Feature - [decodeInExecutor](https://github.com/redisson/redisson/wiki/2.-Configuration#decodeinexecutor) setting added  
 Feature - `lockAsync` and `tryLockAsync` methods with threadId param added to RedissonMultiLock object  
@@ -44,7 +113,7 @@ Fixed - class files should be excluded from META-INF folder
 Fixed - `JndiRedissonSessionManager` shouldn't shutdown Redisson instance (thanks to [jchobantonov](https://github.com/jchobantonov))  
 Fixed - `RDestroyable` interface should be implemented by RMapCache and RSetCache rx/reactive objects  
 
-### 21-Jan-2018 - versions 2.15.1 and 3.10.1 released  
+### 21-Jan-2019 - versions 2.15.1 and 3.10.1 released  
 Feature - `cachedKeySet`, `cachedValues`, `cachedEntrySet` and `getCachedMap` methods added to `RLocalCachedMap` object  
 Feature - __Hibernate 5.4__ support  
 Feature - [search LiveObjects](https://github.com/redisson/redisson/wiki/9.-Distributed-services#rindex) by field  

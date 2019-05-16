@@ -28,6 +28,7 @@ import org.redisson.client.RedisClient;
 import org.redisson.client.protocol.decoder.ListScanResult;
 
 import io.reactivex.Flowable;
+import io.reactivex.Single;
 
 /**
  * Distributed and concurrent implementation of {@link java.util.Set}
@@ -46,7 +47,7 @@ public class RedissonSetRx<V> {
         this.redisson = redisson;
     }
     
-    public Flowable<Boolean> addAll(Publisher<? extends V> c) {
+    public Single<Boolean> addAll(Publisher<? extends V> c) {
         return new PublisherAdder<Object>() {
             @Override
             public RFuture<Boolean> add(Object e) {
@@ -77,27 +78,27 @@ public class RedissonSetRx<V> {
     }
     
     public RPermitExpirableSemaphoreRx getPermitExpirableSemaphore(V value) {
-        String name = ((RedissonSet<V>) instance).getLockName(value, "permitexpirablesemaphore");
+        String name = ((RedissonSet<V>) instance).getLockByValue(value, "permitexpirablesemaphore");
         return redisson.getPermitExpirableSemaphore(name);
     }
 
     public RSemaphoreRx getSemaphore(V value) {
-        String name = ((RedissonSet<V>) instance).getLockName(value, "semaphore");
+        String name = ((RedissonSet<V>) instance).getLockByValue(value, "semaphore");
         return redisson.getSemaphore(name);
     }
     
     public RLockRx getFairLock(V value) {
-        String name = ((RedissonSet<V>) instance).getLockName(value, "fairlock");
+        String name = ((RedissonSet<V>) instance).getLockByValue(value, "fairlock");
         return redisson.getFairLock(name);
     }
     
     public RReadWriteLockRx getReadWriteLock(V value) {
-        String name = ((RedissonSet<V>) instance).getLockName(value, "rw_lock");
+        String name = ((RedissonSet<V>) instance).getLockByValue(value, "rw_lock");
         return redisson.getReadWriteLock(name);
     }
     
     public RLockRx getLock(V value) {
-        String name = ((RedissonSet<V>) instance).getLockName(value, "lock");
+        String name = ((RedissonSet<V>) instance).getLockByValue(value, "lock");
         return redisson.getLock(name);
     }
     

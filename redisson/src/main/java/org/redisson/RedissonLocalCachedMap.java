@@ -33,7 +33,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import org.redisson.api.LocalCachedMapOptions;
-import org.redisson.api.LocalCachedMapOptions.EvictionPolicy;
 import org.redisson.api.LocalCachedMapOptions.ReconnectionStrategy;
 import org.redisson.api.LocalCachedMapOptions.SyncStrategy;
 import org.redisson.api.RFuture;
@@ -41,16 +40,12 @@ import org.redisson.api.RLocalCachedMap;
 import org.redisson.api.RedissonClient;
 import org.redisson.cache.Cache;
 import org.redisson.cache.CacheKey;
-import org.redisson.cache.LFUCacheMap;
-import org.redisson.cache.LRUCacheMap;
 import org.redisson.cache.LocalCacheListener;
 import org.redisson.cache.LocalCacheView;
 import org.redisson.cache.LocalCachedMapClear;
 import org.redisson.cache.LocalCachedMapInvalidate;
 import org.redisson.cache.LocalCachedMapUpdate;
 import org.redisson.cache.LocalCachedMessageCodec;
-import org.redisson.cache.NoneCacheMap;
-import org.redisson.cache.ReferenceCacheMap;
 import org.redisson.client.codec.Codec;
 import org.redisson.client.codec.LongCodec;
 import org.redisson.client.codec.StringCodec;
@@ -132,24 +127,22 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
     private LocalCacheListener listener;
     private LocalCacheView<K, V> localCacheView;
     
-    public RedissonLocalCachedMap(CommandAsyncExecutor commandExecutor, String name, LocalCachedMapOptions<K, V> options, EvictionScheduler evictionScheduler, RedissonClient redisson) {
-        super(commandExecutor, name, redisson, options);
+    public RedissonLocalCachedMap(CommandAsyncExecutor commandExecutor, String name, LocalCachedMapOptions<K, V> options, 
+            EvictionScheduler evictionScheduler, RedissonClient redisson, WriteBehindService writeBehindService) {
+        super(commandExecutor, name, redisson, options, writeBehindService);
         init(name, options, redisson, evictionScheduler);
     }
 
-    public RedissonLocalCachedMap(Codec codec, CommandAsyncExecutor connectionManager, String name, LocalCachedMapOptions<K, V> options, EvictionScheduler evictionScheduler, RedissonClient redisson) {
-        super(codec, connectionManager, name, redisson, options);
+    public RedissonLocalCachedMap(Codec codec, CommandAsyncExecutor connectionManager, String name, LocalCachedMapOptions<K, V> options, 
+            EvictionScheduler evictionScheduler, RedissonClient redisson, WriteBehindService writeBehindService) {
+        super(codec, connectionManager, name, redisson, options, writeBehindService);
         init(name, options, redisson, evictionScheduler);
     }
 
     private void init(String name, LocalCachedMapOptions<K, V> options, RedissonClient redisson, EvictionScheduler evictionScheduler) {
-        instanceId = generateId();
-        
         syncStrategy = options.getSyncStrategy();
 
-        cache = createCache(options);
-
-        listener = new LocalCacheListener(name, commandExecutor, cache, this, instanceId, codec, options, cacheUpdateLogTime) {
+        listener = new LocalCacheListener(name, commandExecutor, this, codec, options, cacheUpdateLogTime) {
             
             @Override
             protected void updateCache(ByteBuf keyBuf, ByteBuf valueBuf) throws IOException {
@@ -160,7 +153,9 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
             }
             
         };
-        listener.add();
+        cache = listener.createCache(options);
+        instanceId = listener.generateId();
+        listener.add(cache);
         localCacheView = new LocalCacheView(cache, this);
 
         if (options.getSyncStrategy() != SyncStrategy.NONE) {
@@ -178,25 +173,6 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
         }
         
         cache.put(cacheKey, new CacheValue(key, value));
-    }
-    
-    protected Cache<CacheKey, CacheValue> createCache(LocalCachedMapOptions<K, V> options) {
-        if (options.getEvictionPolicy() == EvictionPolicy.NONE) {
-            return new NoneCacheMap<CacheKey, CacheValue>(options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.LRU) {
-            return new LRUCacheMap<CacheKey, CacheValue>(options.getCacheSize(), options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.LFU) {
-            return new LFUCacheMap<CacheKey, CacheValue>(options.getCacheSize(), options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.SOFT) {
-            return ReferenceCacheMap.soft(options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        if (options.getEvictionPolicy() == EvictionPolicy.WEAK) {
-            return ReferenceCacheMap.weak(options.getTimeToLiveInMillis(), options.getMaxIdleInMillis());
-        }
-        throw new IllegalArgumentException("Invalid eviction policy: " + options.getEvictionPolicy());
     }
     
     public CacheKey toCacheKey(Object key) {
@@ -257,12 +233,6 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
         return future;
     }
     
-    protected static byte[] generateId() {
-        byte[] id = new byte[16];
-        ThreadLocalRandom.current().nextBytes(id);
-        return id;
-    }
-
     protected static byte[] generateLogEntryId(byte[] keyHash) {
         byte[] result = new byte[keyHash.length + 1 + 8];
         result[16] = ':';
@@ -333,6 +303,7 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
     
     @Override
     public void destroy() {
+        cache.clear();
         listener.remove();
     }
 
@@ -695,6 +666,10 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
         List<V> result = new ArrayList<V>();
         List<Object> mapKeys = new ArrayList<Object>();
         for (CacheValue value : cache.values()) {
+            if (value == null) {
+                continue;
+            }
+
             mapKeys.add(encodeMapKey(value.getKey()));
             result.add((V) value.getValue());
         }
@@ -738,6 +713,9 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
         Map<K, V> result = new HashMap<K, V>();
         List<Object> mapKeys = new ArrayList<Object>();
         for (CacheValue value : cache.values()) {
+            if (value == null) {
+                continue;
+            }
             mapKeys.add(encodeMapKey(value.getKey()));
             result.put((K) value.getKey(), (V) value.getValue());
         }
@@ -789,6 +767,10 @@ public class RedissonLocalCachedMap<K, V> extends RedissonMap<K, V> implements R
         Set<Entry<K, V>> result = new HashSet<Entry<K, V>>();
         List<Object> mapKeys = new ArrayList<Object>();
         for (CacheValue value : cache.values()) {
+            if (value == null) {
+                continue;
+            }
+
             mapKeys.add(encodeMapKey(value.getKey()));
             result.add(new AbstractMap.SimpleEntry<K, V>((K) value.getKey(), (V) value.getValue()));
         }
