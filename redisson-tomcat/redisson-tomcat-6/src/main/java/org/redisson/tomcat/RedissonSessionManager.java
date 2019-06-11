@@ -37,6 +37,7 @@ import org.apache.catalina.util.LifecycleSupport;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
 import org.redisson.Redisson;
+import org.redisson.api.RSet;
 import org.redisson.api.RMap;
 import org.redisson.api.RTopic;
 import org.redisson.api.RedissonClient;
@@ -166,6 +167,12 @@ public class RedissonSessionManager extends ManagerBase implements Lifecycle {
         return session;
     }
 
+    public RSet<String> getNotifiedNodes(String sessionId) {
+        String separator = keyPrefix == null || keyPrefix.isEmpty() ? "" : ":";
+        String name = keyPrefix + separator + "redisson:tomcat_notified_nodes:" + sessionId;
+        return redisson.getSet(name, StringCodec.INSTANCE);
+    }
+
     public RMap<String, Object> getMap(String sessionId) {
         String separator = keyPrefix == null || keyPrefix.isEmpty() ? "" : ":";
         String name = keyPrefix + separator + "redisson:tomcat_session:" + sessionId;
@@ -180,6 +187,10 @@ public class RedissonSessionManager extends ManagerBase implements Lifecycle {
     
     @Override
     public Session findSession(String id) throws IOException {
+        return findSession(id, true);
+    }
+    
+    private Session findSession(String id, boolean notify) throws IOException {
         Session result = super.findSession(id);
         if (result == null) {
             if (id != null) {
@@ -190,14 +201,14 @@ public class RedissonSessionManager extends ManagerBase implements Lifecycle {
                     log.error("Can't read session object by id: " + id, e);
                 }
 
-                if (attrs.isEmpty()) {	
+                if (attrs.isEmpty() || (broadcastSessionEvents && getNotifiedNodes(id).contains(nodeId))) {  
                     log.info("Session " + id + " can't be found");
                     return null;	
                 }
                 
                 RedissonSession session = (RedissonSession) createEmptySession();
                 session.load(attrs);
-                session.setId(id);
+                session.setId(id, notify);
                 
                 session.access();
                 session.endAccess();
@@ -214,7 +225,7 @@ public class RedissonSessionManager extends ManagerBase implements Lifecycle {
     
     @Override
     public Session createEmptySession() {
-        return new RedissonSession(this, readMode, updateMode);
+        return new RedissonSession(this, readMode, updateMode, broadcastSessionEvents);
     }
     
     @Override
@@ -310,6 +321,16 @@ public class RedissonSessionManager extends ManagerBase implements Lifecycle {
                                 if (s == null) {
                                     throw new IllegalStateException("Unable to find session: " + msg.getSessionId());
                                 }
+                            }
+                            
+                            if (msg instanceof SessionDestroyedMessage) {
+                                Session s = findSession(msg.getSessionId(), false);
+                                if (s == null) {
+                                    throw new IllegalStateException("Unable to find session: " + msg.getSessionId());
+                                }
+                                s.expire();
+                                RSet<String> set = getNotifiedNodes(msg.getSessionId());
+                                set.add(nodeId);
                             }
                         }
 
