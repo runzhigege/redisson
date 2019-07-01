@@ -23,11 +23,11 @@ import java.lang.annotation.Target;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.session.MapSession;
-import org.springframework.session.web.http.SessionRepositoryFilter;
+import org.springframework.web.server.session.WebSessionManager;
 
 /**
  * Enables Redisson's Spring Session implementation backed by Redis and
- * exposes {@link SessionRepositoryFilter} as a bean named "springSessionRepositoryFilter".
+ * exposes {@link WebSessionManager} as a bean named "webSessionManager".
  * <p>
  * Redisson instance should be registered as bean in application context.
  * Usage example:
@@ -51,9 +51,9 @@ import org.springframework.session.web.http.SessionRepositoryFilter;
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
-@Import(RedissonHttpSessionConfiguration.class)
+@Import(RedissonWebSessionConfiguration.class)
 @Configuration
-public @interface EnableRedissonHttpSession {
+public @interface EnableRedissonWebSession {
 
     int maxInactiveIntervalInSeconds() default MapSession.DEFAULT_MAX_INACTIVE_INTERVAL_SECONDS;
     

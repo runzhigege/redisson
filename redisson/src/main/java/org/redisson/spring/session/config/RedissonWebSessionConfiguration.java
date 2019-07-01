@@ -18,19 +18,19 @@ package org.redisson.spring.session.config;
 import java.util.Map;
 
 import org.redisson.api.RedissonClient;
-import org.redisson.spring.session.RedissonSessionRepository;
+import org.redisson.spring.session.ReactiveRedissonSessionRepository;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportAware;
 import org.springframework.core.annotation.AnnotationAttributes;
 import org.springframework.core.type.AnnotationMetadata;
-import org.springframework.session.config.annotation.web.http.SpringHttpSessionConfiguration;
-import org.springframework.session.web.http.SessionRepositoryFilter;
+import org.springframework.session.config.annotation.web.server.SpringWebSessionConfiguration;
+import org.springframework.web.server.session.WebSessionManager;
 
 /**
- * Exposes the {@link SessionRepositoryFilter} as the bean
- * named "springSessionRepositoryFilter".
+ * Exposes the {@link WebSessionManager} as the bean
+ * named "webSessionManager".
  * <p>
  * Redisson instance should be registered as bean 
  * in application context.
@@ -39,15 +39,15 @@ import org.springframework.session.web.http.SessionRepositoryFilter;
  *
  */
 @Configuration
-public class RedissonHttpSessionConfiguration extends SpringHttpSessionConfiguration implements ImportAware {
+public class RedissonWebSessionConfiguration extends SpringWebSessionConfiguration implements ImportAware {
 
     private Integer maxInactiveIntervalInSeconds;
     private String keyPrefix;
     
     @Bean
-    public RedissonSessionRepository sessionRepository(
+    public ReactiveRedissonSessionRepository sessionRepository(
             RedissonClient redissonClient, ApplicationEventPublisher eventPublisher) {
-        RedissonSessionRepository repository = new RedissonSessionRepository(redissonClient, eventPublisher, keyPrefix);
+        ReactiveRedissonSessionRepository repository = new ReactiveRedissonSessionRepository(redissonClient, eventPublisher, keyPrefix);
         repository.setDefaultMaxInactiveInterval(maxInactiveIntervalInSeconds);
         return repository;
     }
@@ -62,7 +62,7 @@ public class RedissonHttpSessionConfiguration extends SpringHttpSessionConfigura
 
     @Override
     public void setImportMetadata(AnnotationMetadata importMetadata) {
-        Map<String, Object> map = importMetadata.getAnnotationAttributes(EnableRedissonHttpSession.class.getName());
+        Map<String, Object> map = importMetadata.getAnnotationAttributes(EnableRedissonWebSession.class.getName());
         AnnotationAttributes attrs = AnnotationAttributes.fromMap(map);
         keyPrefix = attrs.getString("keyPrefix");
         maxInactiveIntervalInSeconds = attrs.getNumber("maxInactiveIntervalInSeconds");
